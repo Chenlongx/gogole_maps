@@ -2377,7 +2377,7 @@ class PlaywrightManager:
 
     def run_coroutine(self, coro):
         """
-        【死锁修复版】移除全局锁，允许并发执行，提高性能并避免死锁。
+        【兼容性版本】保持原有同步接口，但使用较短超时避免长时间UI阻塞。
         """
         if not self._loop:
             raise RuntimeError("PlaywrightManager event loop is not running.")
@@ -2385,16 +2385,25 @@ class PlaywrightManager:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         
         try:
-            # 增加超时时间并移除锁，允许并发执行
-            return future.result(timeout=120)  # 增加到120秒超时
+            # 【UI响应性修复】使用较短超时时间，避免长时间UI阻塞
+            return future.result(timeout=30)  # 从120秒减少到30秒
         except asyncio.TimeoutError:
-            print(f"⚠️ 异步任务超时(120秒)，可能是网络问题或页面加载缓慢")
+            print(f"⚠️ 异步任务超时(30秒)，跳过以保持UI响应性")
             future.cancel()
             return None
         except Exception as e:
             print(f"❌ 异步任务执行失败: {e}")
             future.cancel()
             return None
+    
+    def run_coroutine_async(self, coro):
+        """
+        【新增】非阻塞版本，返回Future对象，不会阻塞UI线程。
+        """
+        if not self._loop:
+            raise RuntimeError("PlaywrightManager event loop is not running.")
+        
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)
         
 
 
@@ -4649,10 +4658,18 @@ class GoogleMapsApp(QWidget):
         self.email_worker_thread = threading.Thread(target=self._email_worker_loop, daemon=True)
         self.email_worker_thread.start()
 
-        # 4. 创建一个低频的 QTimer 作为“UI更新器”
+        # 4. 创建一个低频的 QTimer 作为"UI更新器"
         self.result_processor_timer = QTimer(self)
         self.result_processor_timer.timeout.connect(self._process_result_queue)
-        self.result_processor_timer.start(500) # 每200毫秒检查一次结果队列
+        self.result_processor_timer.start(500) # 每500毫秒检查一次结果队列
+        
+        # 【UI响应性监控】创建UI响应性监控定时器
+        self.ui_responsiveness_timer = QTimer(self)
+        self.ui_responsiveness_timer.timeout.connect(self._check_ui_responsiveness)
+        self.ui_responsiveness_timer.start(5000)  # 每5秒检查一次UI响应性
+        import time
+        self._last_ui_check = time.time()
+        print("🔧 [UI监控] UI响应性监控已启动，每5秒检查一次")
 
 
         # self.username = username
@@ -5350,29 +5367,49 @@ class GoogleMapsApp(QWidget):
                         max_concurrent = min(15, self.playwright_pool_size * 3)  # 每个页面最多3个并发请求
                         async def create_semaphore_coro(): return asyncio.Semaphore(max_concurrent)
                         future = asyncio.run_coroutine_threadsafe(create_semaphore_coro(), pm_loop)
-                        self.global_network_semaphore = future.result()
-                        print(f"✅ [架构] 全局网络请求限流阀已创建，最大并发数: {max_concurrent} (基于{self.playwright_pool_size}个页面池)")
+                        try:
+                            # 【UI响应性修复】使用短超时避免UI阻塞
+                            self.global_network_semaphore = future.result(timeout=5)
+                            print(f"✅ [架构] 全局网络请求限流阀已创建，最大并发数: {max_concurrent} (基于{self.playwright_pool_size}个页面池)")
+                        except asyncio.TimeoutError:
+                            print(f"⚠️ 创建网络限流阀超时，使用默认配置")
+                            # 创建一个默认的信号量，避免程序崩溃
+                            import asyncio
+                            self.global_network_semaphore = asyncio.Semaphore(max_concurrent)
 
-                    worker = EmailFetcherWorker(
-                        # ... 这里的参数保持您上一次修复后的状态 ...
-                        website=worker_args['website'],
-                        company_name=worker_args.get('company_name', ""),
-                        address=worker_args['address'],
-                        phone=worker_args['phone'],
-                        row=worker_args['row'],
-                        playwright_manager=self.playwright_manager,
-                        global_semaphore=self.global_network_semaphore,
-                        country=self.country_combo.currentText(),
-                        social_platforms_to_scrape=self.social_platforms_to_scrape,
-                        whatsapp_validation_mode=self.whatsapp_validation_mode,
-                        whatsapp_manager=self.whatsapp_manager,
-                        is_speed_mode=self.is_speed_mode,
-                        collect_all_emails_mode=self.collect_all_emails_mode,
-                        extreme_deep_scan_mode=self.extreme_deep_scan_mode,
-                        enable_playwright_fallback=worker_args.get('enable_playwright_fallback', True)
-                    )
+                    # 【UI响应性修复】直接异步执行fetch_email，避免创建Worker对象
+                    # 这样可以完全避免UI线程阻塞问题
+                    async def async_email_task():
+                        worker = EmailFetcherWorker(
+                            website=worker_args['website'],
+                            company_name=worker_args.get('company_name', ""),
+                            address=worker_args['address'],
+                            phone=worker_args['phone'],
+                            row=worker_args['row'],
+                            playwright_manager=self.playwright_manager,
+                            global_semaphore=self.global_network_semaphore,
+                            country=self.country_combo.currentText(),
+                            social_platforms_to_scrape=self.social_platforms_to_scrape,
+                            whatsapp_validation_mode=self.whatsapp_validation_mode,
+                            whatsapp_manager=self.whatsapp_manager,
+                            is_speed_mode=self.is_speed_mode,
+                            collect_all_emails_mode=self.collect_all_emails_mode,
+                            extreme_deep_scan_mode=self.extreme_deep_scan_mode,
+                            enable_playwright_fallback=worker_args.get('enable_playwright_fallback', True)
+                        )
+                        print(f"🔄 异步Worker启动: {worker.company_name} (行{worker.row})")
+                        try:
+                            result = await worker.fetch_email()
+                            if result is None:
+                                print(f"⚠️ 异步Worker超时: {worker.company_name}")
+                                return {'email': "Timeout: 页面池繁忙或网络超时"}, worker.row
+                            print(f"✅ 异步Worker完成: {worker.company_name}")
+                            return result
+                        except Exception as e:
+                            print(f"❌ 异步Worker异常: {worker.company_name} - {e}")
+                            return {'email': f"Error: {type(e).__name__}"}, worker.row
                     
-                    future = asyncio.run_coroutine_threadsafe(worker.fetch_email(), pm_loop)
+                    future = asyncio.run_coroutine_threadsafe(async_email_task(), pm_loop)
                     future.add_done_callback(self._on_email_task_completed)
                 else:
                     print("❌ 严重错误: Playwright 管理器的事件循环未运行！")
@@ -5386,6 +5423,25 @@ class GoogleMapsApp(QWidget):
                 # 发生未知异常时，最好也释放一个令牌，防止死锁
                 if 'email_worker_semaphore' in self.__dict__:
                     self.email_worker_semaphore.release()
+
+    def _check_ui_responsiveness(self):
+        """
+        【UI响应性监控】检查UI线程是否响应正常
+        """
+        import time
+        current_time = time.time()
+        if hasattr(self, '_last_ui_check'):
+            time_diff = current_time - self._last_ui_check
+            if time_diff > 7:  # 如果超过7秒才被调用，说明UI可能卡顿
+                print(f"⚠️ [UI监控] 检测到UI响应延迟 {time_diff:.1f}秒，可能存在阻塞")
+                # 检查活跃的Worker数量
+                if hasattr(self, 'email_worker_semaphore'):
+                    active_workers = self.email_worker_semaphore_count - self.email_worker_semaphore._value
+                    queue_size = self.email_task_queue.qsize() if hasattr(self, 'email_task_queue') else 0
+                    print(f"📊 [UI监控] 当前状态 - 活跃Worker: {active_workers}/{self.email_worker_semaphore_count}, 队列: {queue_size}")
+            else:
+                print(f"✅ [UI监控] UI响应正常 ({time_diff:.1f}s)")
+        self._last_ui_check = current_time
 
     def _process_result_queue(self):
         """

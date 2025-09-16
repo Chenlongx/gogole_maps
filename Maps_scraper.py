@@ -196,13 +196,13 @@ def get_performance_defaults():
         
         # --- 推荐逻辑 ---
         
-        # 1. 推荐后台浏览器 (Playwright) 的数量 (这个最吃资源，要保守)
+        # 【资源匹配修复】推荐后台浏览器 (Playwright) 的数量，与EmailWorker信号量匹配
         if total_ram_gb >= 12 and cpu_cores > 8:
-            defaults['playwright_pool_size'] = 3 # 高性能：12GB内存以上 且 8核以上
+            defaults['playwright_pool_size'] = 5 # 高性能：增加到5个页面，匹配EmailWorker需求
         elif total_ram_gb >= 6 and cpu_cores > 4:
-            defaults['playwright_pool_size'] = 2 # 中等性能：6GB内存以上 且 4核以上
+            defaults['playwright_pool_size'] = 3 # 中等性能：保持3个页面
         else:
-            defaults['playwright_pool_size'] = 1 # 低性能或未知：其他情况
+            defaults['playwright_pool_size'] = 2 # 低性能：至少2个页面避免阻塞
             
         # 2. 推荐地图采集页面 (QWebEngineView) 的数量 (相对较轻)
         if total_ram_gb < 6:
@@ -1690,12 +1690,17 @@ class EmailFetcherWorker:
         添加了更智能的超时和错误处理机制。
         """
         try:
-            # 使用修复后的run_coroutine，它现在支持并发执行且超时时间更长
+            # 【超时保护】使用修复后的run_coroutine，添加更详细的错误处理
+            print(f"🔄 Worker启动: {self.company_name} (行{self.row})")
             result = self.playwright_manager.run_coroutine(self.fetch_email())
+            
             if result is None:
                 # 如果超时或失败，返回一个标准格式的结果
-                error_result = {'email': "Timeout: 请求超时或页面池繁忙"}
+                print(f"⚠️ Worker超时: {self.company_name} - 可能是页面池繁忙或网络问题")
+                error_result = {'email': "Timeout: 页面池繁忙或网络超时"}
                 return error_result, self.row
+            
+            print(f"✅ Worker完成: {self.company_name}")
             return result
         except Exception as e:
             print(f"❌ EmailFetcherWorker.run() 发生严重错误: {e}")
@@ -2531,10 +2536,14 @@ class PlaywrightManager:
             print("❌ Playwright 管理器或页面池未就绪，无法获取页面。")
             return None
 
-        # 检查页面池可用性，如果没有空闲页面立即返回避免阻塞
-        if self.page_pool.empty():
-            print(f"⚠️ 页面池暂时无可用页面(0/{self.pool_size}) ({url})，跳过请求避免阻塞程序。")
+        # 【智能资源管理】检查页面池可用性，如果没有空闲页面立即返回避免阻塞
+        current_available = self.page_pool.qsize()
+        if current_available == 0:
+            print(f"⚠️ 页面池资源已满(0/{self.pool_size})，跳过请求: {url[:50]}...")
+            print(f"💡 建议：如果频繁出现此消息，可考虑增加页面池大小或减少并发数")
             return None
+        else:
+            print(f"📊 页面池状态: {current_available}/{self.pool_size} 可用，处理: {url[:50]}...")
 
         self._reset_shutdown_timer()
         page = None
@@ -4630,9 +4639,11 @@ class GoogleMapsApp(QWidget):
         # 2. 创建一个专属的、线程安全的【邮件结果队列】（消费者->UI）
         self.email_result_queue = Queue()
 
-        # 创建一个值为5的信号量，作为后台邮件提取任务的“通行令牌”
-        # 这意味着最多只允许5个EmailFetcherWorker任务同时处于活跃状态
-        self.email_worker_semaphore = threading.Semaphore(5)
+        # 【资源匹配修复】创建信号量，数量与Playwright页面池大小匹配
+        # 这确保EmailFetcherWorker数量不会超过可用的页面池资源，避免资源争抢
+        semaphore_count = min(self.playwright_pool_size, 5)  # 最多5个，避免过度并发
+        self.email_worker_semaphore = threading.Semaphore(semaphore_count)
+        print(f"📊 [资源配置] EmailWorker信号量: {semaphore_count}, Playwright页面池: {self.playwright_pool_size}")
 
         # 3. 创建并启动一个【独立的、单个的】后台线程，专门用于处理这个队列
         self.email_worker_thread = threading.Thread(target=self._email_worker_loop, daemon=True)
@@ -5321,13 +5332,26 @@ class GoogleMapsApp(QWidget):
                     self.email_worker_semaphore.release() # 退出前释放令牌
                     break
                 
+                # 【资源监控】周期性报告资源使用情况
+                if not hasattr(self, '_last_resource_report'):
+                    self._last_resource_report = 0
+                import time
+                current_time = time.time()
+                if current_time - self._last_resource_report > 30:  # 每30秒报告一次
+                    active_workers = semaphore_count - self.email_worker_semaphore._value
+                    queue_size = self.email_task_queue.qsize()
+                    print(f"📊 [资源监控] 活跃Worker: {active_workers}/{semaphore_count}, 队列任务: {queue_size}")
+                    self._last_resource_report = current_time
+                
                 pm_loop = self.get_playwright_manager()._loop
                 if pm_loop:
                     if not hasattr(self, 'global_network_semaphore'):
-                        async def create_semaphore_coro(): return asyncio.Semaphore(15)
+                        # 【智能限流】根据页面池大小动态调整网络并发数
+                        max_concurrent = min(15, self.playwright_pool_size * 3)  # 每个页面最多3个并发请求
+                        async def create_semaphore_coro(): return asyncio.Semaphore(max_concurrent)
                         future = asyncio.run_coroutine_threadsafe(create_semaphore_coro(), pm_loop)
                         self.global_network_semaphore = future.result()
-                        print("✅ [架构] 全局网络请求限流阀 (总闸) 已创建，最大并发数: 15")
+                        print(f"✅ [架构] 全局网络请求限流阀已创建，最大并发数: {max_concurrent} (基于{self.playwright_pool_size}个页面池)")
 
                     worker = EmailFetcherWorker(
                         # ... 这里的参数保持您上一次修复后的状态 ...

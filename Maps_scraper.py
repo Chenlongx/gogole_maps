@@ -5364,6 +5364,7 @@ class GoogleMapsApp(QWidget):
                 if pm_loop:
                     if not hasattr(self, 'global_network_semaphore'):
                         # 【智能限流】根据页面池大小动态调整网络并发数
+                        import asyncio  # 【修复】确保asyncio模块在此作用域可用
                         max_concurrent = min(15, self.playwright_pool_size * 3)  # 每个页面最多3个并发请求
                         async def create_semaphore_coro(): return asyncio.Semaphore(max_concurrent)
                         future = asyncio.run_coroutine_threadsafe(create_semaphore_coro(), pm_loop)
@@ -5374,7 +5375,6 @@ class GoogleMapsApp(QWidget):
                         except asyncio.TimeoutError:
                             print(f"⚠️ 创建网络限流阀超时，使用默认配置")
                             # 创建一个默认的信号量，避免程序崩溃
-                            import asyncio
                             self.global_network_semaphore = asyncio.Semaphore(max_concurrent)
 
                     # 【UI响应性修复】直接异步执行fetch_email，避免创建Worker对象

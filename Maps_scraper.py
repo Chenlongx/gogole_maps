@@ -1686,12 +1686,17 @@ class EmailFetcherWorker:
     @pyqtSlot()
     def run(self):
         """
-        【修改版】此方法现在是一个简单的包装器，用于同步执行核心的异步任务。
+        【死锁修复版】此方法现在是一个简单的包装器，用于同步执行核心的异步任务。
+        添加了更智能的超时和错误处理机制。
         """
         try:
-            # run_coroutine 会阻塞并等待 fetch_email 完成，然后返回其结果
-            # 由于我们已经修复了 fetch_email，它现在总能返回正确的元组
-            return self.playwright_manager.run_coroutine(self.fetch_email())
+            # 使用修复后的run_coroutine，它现在支持并发执行且超时时间更长
+            result = self.playwright_manager.run_coroutine(self.fetch_email())
+            if result is None:
+                # 如果超时或失败，返回一个标准格式的结果
+                error_result = {'email': "Timeout: 请求超时或页面池繁忙"}
+                return error_result, self.row
+            return result
         except Exception as e:
             print(f"❌ EmailFetcherWorker.run() 发生严重错误: {e}")
             traceback.print_exc()
@@ -2367,88 +2372,90 @@ class PlaywrightManager:
 
     def run_coroutine(self, coro):
         """
-        【修改版】在管理器的事件循环中安全地运行一个协程，并使用锁来确保串行执行。
+        【死锁修复版】移除全局锁，允许并发执行，提高性能并避免死锁。
         """
-        # --- ▼▼▼ 使用 with self._lock: 包裹核心逻辑 ▼▼▼ ---
-        with self._lock:
-            if not self._loop:
-                raise RuntimeError("PlaywrightManager event loop is not running.")
-            
-            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-            
-            try:
-                # 只有获得了锁的线程，才能执行这部分阻塞代码
-                return future.result(timeout=60)
-            except Exception as e:
-                print(f"❌ 异步任务执行失败或超时: {e}")
-                future.cancel()
-                return None
+        if not self._loop:
+            raise RuntimeError("PlaywrightManager event loop is not running.")
+        
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        
+        try:
+            # 增加超时时间并移除锁，允许并发执行
+            return future.result(timeout=120)  # 增加到120秒超时
+        except asyncio.TimeoutError:
+            print(f"⚠️ 异步任务超时(120秒)，可能是网络问题或页面加载缓慢")
+            future.cancel()
+            return None
+        except Exception as e:
+            print(f"❌ 异步任务执行失败: {e}")
+            future.cancel()
+            return None
         
 
 
     # 在 class PlaywrightManager 中，替换这个方法：
     async def _initialize_internal(self):
         """
-        【并行修复版】内部初始化方法。
+        【死锁修复版】内部初始化方法。
         除了启动浏览器，还会创建N个浏览器页面并放入资源池。
+        移除锁以避免死锁，使用状态检查来防止重复初始化。
         """
-        with self._lock: # 使用锁来防止多个线程同时尝试初始化
-            if self.initialization_successful:
-                return # 如果已经初始化成功，则直接返回，避免重复操作
+        if self.initialization_successful:
+            return # 如果已经初始化成功，则直接返回，避免重复操作
             
-            print("🚀 正在启动 Playwright 浏览器实例并创建页面资源池...")
-            try:
-                # 动态生成一个真实的Windows Chrome浏览器User-Agent
-                ua = UserAgent(os='windows')
-                ua_string = ua.chrome
-                
-                # 启动 Playwright 服务
-                self._playwright = await async_playwright().start()
+        print("🚀 正在启动 Playwright 浏览器实例并创建页面资源池...")
+        try:
+            # 动态生成一个真实的Windows Chrome浏览器User-Agent
+            ua = UserAgent(os='windows')
+            ua_string = ua.chrome
+            
+            # 启动 Playwright 服务
+            self._playwright = await async_playwright().start()
 
-                # 准备浏览器启动选项
-                launch_options = {
-                    'headless': True, 
-                    'args': ['--no-sandbox', '--disable-dev-shm-usage']
-                }
-                
-                # 如果程序是在打包后（.exe）的环境中运行
-                if getattr(sys, 'frozen', False):
-                    # 智能地寻找捆绑在程序包内的浏览器可执行文件
-                    executable_path = resource_path(os.path.join('ms-playwright', 'chromium-1187', 'chrome-win', 'chrome.exe'))
-                    if os.path.exists(executable_path):
-                        launch_options['executable_path'] = executable_path
-                    else:
-                        # 如果找不到，这是一个致命错误，无法继续
-                        print(f"❌ [打包环境] 严重错误: 找不到捆绑的浏览器可执行文件！")
-                        return
+            # 准备浏览器启动选项
+            launch_options = {
+                'headless': True, 
+                'args': ['--no-sandbox', '--disable-dev-shm-usage']
+            }
+            
+            # 如果程序是在打包后（.exe）的环境中运行
+            if getattr(sys, 'frozen', False):
+                # 智能地寻找捆绑在程序包内的浏览器可执行文件
+                executable_path = resource_path(os.path.join('ms-playwright', 'chromium-1187', 'chrome-win', 'chrome.exe'))
+                if os.path.exists(executable_path):
+                    launch_options['executable_path'] = executable_path
+                else:
+                    # 如果找不到，这是一个致命错误，无法继续
+                    print(f"❌ [打包环境] 严重错误: 找不到捆绑的浏览器可执行文件！")
+                    return
 
-                # 启动Chromium浏览器实例
-                self._browser = await self._playwright.chromium.launch(**launch_options)
-                # 创建一个带有自定义User-Agent的、干净的浏览器上下文
-                self._context = await self._browser.new_context(user_agent=ua_string)
-                # 在上下文中注入反-反爬虫（stealth）脚本
-                await self._apply_stealth_script()
+            # 启动Chromium浏览器实例
+            self._browser = await self._playwright.chromium.launch(**launch_options)
+            # 创建一个带有自定义User-Agent的、干净的浏览器上下文
+            self._context = await self._browser.new_context(user_agent=ua_string)
+            # 在上下文中注入反-反爬虫（stealth）脚本
+            await self._apply_stealth_script()
 
-                # --- 【核心新增】创建并填充页面池 ---
-                # 创建一个异步队列作为我们的页面资源池，最大容量为 self.pool_size
-                self.page_pool = asyncio.Queue(maxsize=self.pool_size)
-                # 循环创建指定数量的浏览器页面，并逐个放入池中
-                for i in range(self.pool_size):
-                    page = await self._context.new_page()
-                    await self.page_pool.put(page)
-                print(f"  -> ✅ 已成功创建 {self.pool_size} 个浏览器页面的资源池。")
-                # ------------------------------------
-                
-                # 标记初始化成功
-                self.initialization_successful = True
-                print("✅ Playwright 浏览器实例及页面池已准备就绪。")
+            # --- 【核心新增】创建并填充页面池 ---
+            # 创建一个异步队列作为我们的页面资源池，最大容量为 self.pool_size
+            self.page_pool = asyncio.Queue(maxsize=self.pool_size)
+            # 循环创建指定数量的浏览器页面，并逐个放入池中
+            for i in range(self.pool_size):
+                page = await self._context.new_page()
+                await self.page_pool.put(page)
+            print(f"  -> ✅ 已成功创建 {self.pool_size} 个浏览器页面的资源池。")
+            # ------------------------------------
+            
+            # 标记初始化成功
+            self.initialization_successful = True
+            print("✅ Playwright 浏览器实例及页面池已准备就绪。")
 
-            except Exception as e:
-                # 如果在上述任何步骤中发生异常，打印详细错误并设置失败状态
-                traceback.print_exc()
-                print(f"❌ 启动 Playwright 失败: {e}")
-                self._browser = None
-                self.initialization_successful = False
+        except Exception as e:
+            # 如果在上述任何步骤中发生异常，打印详细错误并设置失败状态
+            traceback.print_exc()
+            print(f"❌ 启动 Playwright 失败: {e}")
+            self._browser = None
+            self.initialization_successful = False
     
     def is_available(self):
         """公开的检查方法，用于判断Playwright是否已成功初始化。"""
@@ -2517,18 +2524,23 @@ class PlaywrightManager:
 
     async def get_page_content(self, url: str) -> str | None:
         """
-        【并行修复版】从页面池中获取一个页面来执行抓取任务，用完后归还。
-        这是实现并行处理的核心。
+        【死锁修复版】从页面池中获取一个页面来执行抓取任务，用完后归还。
+        添加了智能降级和资源监控机制。
         """
         if not self.is_available() or not self.page_pool:
             print("❌ Playwright 管理器或页面池未就绪，无法获取页面。")
             return None
 
+        # 检查页面池可用性，如果没有空闲页面立即返回避免阻塞
+        if self.page_pool.empty():
+            print(f"⚠️ 页面池暂时无可用页面(0/{self.pool_size}) ({url})，跳过请求避免阻塞程序。")
+            return None
+
         self._reset_shutdown_timer()
         page = None
         try:
-            # 【修复】从池中获取一个空闲页面，如果池为空会在此安全等待
-            page = await asyncio.wait_for(self.page_pool.get(), timeout=20.0)
+            # 【修复】从池中获取一个空闲页面，增加超时时间避免长时间等待
+            page = await asyncio.wait_for(self.page_pool.get(), timeout=30.0)
             
             print(f"  -> [Playwright池] 页面已出队，正在访问: {url}")
             if self._speed_mode_enabled:
@@ -2538,7 +2550,7 @@ class PlaywrightManager:
             content = await page.content()
             return content
         except asyncio.TimeoutError:
-            print(f"❌ 从页面池获取页面或加载页面超时 ({url})。可能所有页面都在忙或网站响应慢。")
+            print(f"⚠️ 页面池资源繁忙，获取页面超时 ({url})。跳过此请求以避免阻塞。")
             return None
         except Exception as e:
             print(f"❌ Playwright 访问页面时发生错误 ({url}): {e}")

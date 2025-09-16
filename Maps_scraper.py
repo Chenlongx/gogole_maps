@@ -4641,9 +4641,9 @@ class GoogleMapsApp(QWidget):
 
         # 【资源匹配修复】创建信号量，数量与Playwright页面池大小匹配
         # 这确保EmailFetcherWorker数量不会超过可用的页面池资源，避免资源争抢
-        semaphore_count = min(self.playwright_pool_size, 5)  # 最多5个，避免过度并发
-        self.email_worker_semaphore = threading.Semaphore(semaphore_count)
-        print(f"📊 [资源配置] EmailWorker信号量: {semaphore_count}, Playwright页面池: {self.playwright_pool_size}")
+        self.email_worker_semaphore_count = min(self.playwright_pool_size, 5)  # 最多5个，避免过度并发
+        self.email_worker_semaphore = threading.Semaphore(self.email_worker_semaphore_count)
+        print(f"📊 [资源配置] EmailWorker信号量: {self.email_worker_semaphore_count}, Playwright页面池: {self.playwright_pool_size}")
 
         # 3. 创建并启动一个【独立的、单个的】后台线程，专门用于处理这个队列
         self.email_worker_thread = threading.Thread(target=self._email_worker_loop, daemon=True)
@@ -5338,9 +5338,9 @@ class GoogleMapsApp(QWidget):
                 import time
                 current_time = time.time()
                 if current_time - self._last_resource_report > 30:  # 每30秒报告一次
-                    active_workers = semaphore_count - self.email_worker_semaphore._value
+                    active_workers = self.email_worker_semaphore_count - self.email_worker_semaphore._value
                     queue_size = self.email_task_queue.qsize()
-                    print(f"📊 [资源监控] 活跃Worker: {active_workers}/{semaphore_count}, 队列任务: {queue_size}")
+                    print(f"📊 [资源监控] 活跃Worker: {active_workers}/{self.email_worker_semaphore_count}, 队列任务: {queue_size}")
                     self._last_resource_report = current_time
                 
                 pm_loop = self.get_playwright_manager()._loop

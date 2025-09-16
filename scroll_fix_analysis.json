@@ -1,0 +1,74 @@
+{
+  "analysis_time": "2025-09-16 04:54:28",
+  "issues_found": {
+    "sync_javascript": {
+      "count": 7,
+      "description": "发现7处同步JavaScript调用，会阻塞UI线程",
+      "severity": "HIGH",
+      "examples": [
+        "runJavaScript(self.JS_EXTRACT_SINGLE_PAGE_DETAIL, \n            lambda result, idx=tab_index: self.handle_single_result_data(result, idx)",
+        "runJavaScript(js_get_count, \n            lambda count, idx=tab_index, prev_c=previous_count: self._handle_count_check(count, prev_c, idx)",
+        "runJavaScript(js_pre_check, \n            lambda result, idx=tab_index: self._handle_pre_check_result(result, idx)"
+      ]
+    },
+    "qtimer_overuse": {
+      "count": 7,
+      "description": "发现7处QTimer.singleShot调用，可能造成主线程阻塞",
+      "severity": "MEDIUM",
+      "examples": [
+        "QTimer.singleShot(500,",
+        "QTimer.singleShot(500,",
+        "QTimer.singleShot(500,"
+      ]
+    },
+    "scroll_polling": {
+      "count": 6,
+      "description": "发现6处滚动轮询模式，频繁DOM查询会导致卡顿",
+      "severity": "HIGH",
+      "examples": [
+        "_scroll_and_wait",
+        "_scroll_and_wait",
+        "_scroll_and_wait"
+      ]
+    }
+  },
+  "fix_plan": {
+    "immediate_fixes": [
+      {
+        "title": "异步化JavaScript执行",
+        "description": "将所有runJavaScript调用改为异步模式",
+        "implementation": "\n# 替换同步调用\n# 原代码：\nbrowser_view.page().runJavaScript(js_code, callback)\n\n# 修复代码：\ndef async_js_executor(js_code, callback, timeout=5):\n    result_container = {'result': None, 'completed': False}\n    \n    def internal_callback(result):\n        result_container['result'] = result\n        result_container['completed'] = True\n        if callback:\n            callback(result)\n    \n    # 在主线程中执行\n    QTimer.singleShot(0, lambda: browser_view.page().runJavaScript(js_code, internal_callback))\n    \n    # 异步等待结果\n    start_time = time.time()\n    while not result_container['completed'] and time.time() - start_time < timeout:\n        QApplication.processEvents()  # 保持UI响应\n        time.sleep(0.01)\n    \n    return result_container.get('result')\n                ",
+        "priority": "HIGH"
+      },
+      {
+        "title": "实现滚动节流机制",
+        "description": "限制滚动频率，避免过度频繁的滚动操作",
+        "implementation": "\nclass ScrollThrottler:\n    def __init__(self, throttle_ms=200):\n        self.throttle_ms = throttle_ms\n        self.last_scroll_times = {}\n    \n    def can_scroll(self, tab_index):\n        current_time = time.time() * 1000\n        last_time = self.last_scroll_times.get(tab_index, 0)\n        \n        if current_time - last_time >= self.throttle_ms:\n            self.last_scroll_times[tab_index] = current_time\n            return True\n        return False\n\n# 在滚动前检查\nscroll_throttler = ScrollThrottler(200)  # 200ms节流\nif scroll_throttler.can_scroll(tab_index):\n    # 执行滚动操作\n    pass\nelse:\n    print(f\"滚动被节流，跳过此次操作\")\n                ",
+        "priority": "HIGH"
+      }
+    ],
+    "performance_optimizations": [
+      {
+        "title": "后台线程处理滚动逻辑",
+        "description": "将耗时的滚动检测逻辑移到后台线程",
+        "implementation": "\nfrom concurrent.futures import ThreadPoolExecutor\nimport threading\n\nclass BackgroundScrollProcessor:\n    def __init__(self):\n        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix=\"ScrollWorker\")\n        self.active_tasks = {}\n    \n    def process_scroll_async(self, tab_index, browser_view, callback):\n        def scroll_task():\n            try:\n                # 在后台线程中执行滚动检测逻辑\n                result = self._check_scroll_status(browser_view)\n                \n                # 回调到主线程\n                QTimer.singleShot(0, lambda: callback(result))\n                \n            except Exception as e:\n                QTimer.singleShot(0, lambda: callback({'error': str(e)}))\n        \n        future = self.executor.submit(scroll_task)\n        self.active_tasks[tab_index] = future\n        return future\n                ",
+        "priority": "MEDIUM"
+      },
+      {
+        "title": "DOM元素智能清理",
+        "description": "定期清理不必要的DOM元素，释放内存",
+        "implementation": "\nclass DOMCleaner:\n    def __init__(self, cleanup_interval=1000):\n        self.cleanup_interval = cleanup_interval\n        self.processed_count = 0\n    \n    def should_cleanup(self):\n        self.processed_count += 1\n        return self.processed_count % self.cleanup_interval == 0\n    \n    def cleanup_dom(self, browser_view):\n        cleanup_js = '''\n        (function() {\n            // 只保留最后100个商家元素，删除其他的\n            const merchants = document.querySelectorAll('.Nv2PK');\n            let cleaned = 0;\n            \n            if (merchants.length > 100) {\n                for (let i = 0; i < merchants.length - 100; i++) {\n                    if (merchants[i] && merchants[i].parentNode) {\n                        merchants[i].parentNode.removeChild(merchants[i]);\n                        cleaned++;\n                    }\n                }\n            }\n            \n            // 强制垃圾回收\n            if (window.gc) window.gc();\n            \n            return {\n                cleaned: cleaned,\n                remaining: document.querySelectorAll('.Nv2PK').length\n            };\n        })();\n        '''\n        \n        def cleanup_callback(result):\n            if result:\n                print(f\"🧹 清理了{result.get('cleaned', 0)}个DOM元素，保留{result.get('remaining', 0)}个\")\n        \n        browser_view.page().runJavaScript(cleanup_js, cleanup_callback)\n                ",
+        "priority": "MEDIUM"
+      }
+    ],
+    "monitoring_additions": [
+      {
+        "title": "滚动性能监控",
+        "description": "添加实时滚动性能监控",
+        "implementation": "\nclass ScrollPerformanceMonitor:\n    def __init__(self):\n        self.scroll_metrics = {\n            'total_scrolls': 0,\n            'avg_scroll_time': 0,\n            'max_scroll_time': 0,\n            'ui_freeze_count': 0\n        }\n        self.last_ui_update = time.time()\n    \n    def record_scroll_start(self):\n        self.scroll_start_time = time.time()\n    \n    def record_scroll_end(self):\n        if hasattr(self, 'scroll_start_time'):\n            scroll_duration = time.time() - self.scroll_start_time\n            self.scroll_metrics['total_scrolls'] += 1\n            self.scroll_metrics['avg_scroll_time'] = (\n                (self.scroll_metrics['avg_scroll_time'] * (self.scroll_metrics['total_scrolls'] - 1) + scroll_duration) /\n                self.scroll_metrics['total_scrolls']\n            )\n            self.scroll_metrics['max_scroll_time'] = max(self.scroll_metrics['max_scroll_time'], scroll_duration)\n            \n            if scroll_duration > 2.0:  # 超过2秒视为UI冻结\n                self.scroll_metrics['ui_freeze_count'] += 1\n                print(f\"⚠️ 检测到UI冻结: {scroll_duration:.1f}秒\")\n    \n    def get_performance_report(self):\n        return f'''\n滚动性能报告:\n- 总滚动次数: {self.scroll_metrics['total_scrolls']}\n- 平均滚动时间: {self.scroll_metrics['avg_scroll_time']:.2f}秒\n- 最大滚动时间: {self.scroll_metrics['max_scroll_time']:.2f}秒\n- UI冻结次数: {self.scroll_metrics['ui_freeze_count']}\n        '''\n                ",
+        "priority": "LOW"
+      }
+    ]
+  },
+  "integration_guide": "\n# Maps_scraper.py 滚动卡顿修复集成指南\n\n## 🔧 修复步骤\n\n### 1. 备份原文件\n```bash\ncp Maps_scraper.py Maps_scraper.py.backup\n```\n\n### 2. 在GoogleMapsApp类的__init__方法中添加\n```python\ndef __init__(self):\n    # ... 现有代码 ...\n    \n    # 添加滚动性能优化组件\n    self.scroll_throttler = ScrollThrottler(200)  # 200ms节流\n    self.background_processor = BackgroundScrollProcessor()\n    self.dom_cleaner = DOMCleaner(1000)  # 每处理1000个商家清理一次\n    self.performance_monitor = ScrollPerformanceMonitor()\n    \n    print(\"🚀 [滚动优化] 性能优化组件已初始化\")\n```\n\n### 3. 替换_scroll_and_wait方法\n```python\ndef _scroll_and_wait(self, tab_index, current_count):\n    \"\"\"【性能优化版】滚动列表并等待新结果\"\"\"\n    \n    # 检查节流\n    if not self.scroll_throttler.can_scroll(tab_index):\n        print(f\"🔄 (标签页 {tab_index+1}) 滚动被节流，稍后重试\")\n        QTimer.singleShot(300, lambda: self._scroll_and_wait(tab_index, current_count))\n        return\n    \n    browser_view = self.tabs[tab_index]['view']\n    \n    # 记录滚动开始\n    self.performance_monitor.record_scroll_start()\n    \n    # 异步执行滚动\n    def scroll_callback(result):\n        self.performance_monitor.record_scroll_end()\n        self._handle_scroll_result(tab_index, current_count, result)\n    \n    self.background_processor.process_scroll_async(tab_index, browser_view, scroll_callback)\n```\n\n### 4. 添加DOM清理检查\n```python\ndef after_extraction_and_move_on(self, tab_index):\n    \"\"\"【改造版】处理完一个商家后，继续处理下一个\"\"\"\n    if not self.is_searching or tab_index >= len(self.tabs): \n        return\n    \n    tab_info = self.tabs[tab_index]\n    if tab_info['state'] != 'running': \n        return\n\n    tab_info['current_item_index'] = tab_info.get('current_item_index', 0) + 1\n    \n    # 检查是否需要DOM清理\n    if self.dom_cleaner.should_cleanup():\n        self.dom_cleaner.cleanup_dom(tab_info['view'])\n    \n    # 继续处理下一个商家\n    QTimer.singleShot(100, lambda: self._process_next_item(tab_index))\n```\n\n### 5. 添加性能监控输出\n```python\ndef finish_region_extraction(self, tab_index):\n    \"\"\"【改造版】一个地区任务完成后的核心回调\"\"\"\n    # ... 现有代码 ...\n    \n    # 输出性能报告\n    print(self.performance_monitor.get_performance_report())\n    \n    # ... 其余代码不变 ...\n```\n\n## 📊 预期效果\n\n修复后应该观察到：\n1. ✅ 滚动操作不再长时间阻塞UI\n2. ✅ 内存使用更加稳定，不会持续增长\n3. ✅ 滚动响应更加流畅\n4. ✅ 程序不会在滚动到底部时卡死\n\n## 🔍 监控指标\n\n通过日志观察以下指标：\n- 滚动节流日志：\"滚动被节流，稍后重试\"\n- DOM清理日志：\"清理了X个DOM元素\"\n- UI冻结警告：\"检测到UI冻结: X秒\"\n- 性能报告：平均滚动时间应<1秒\n\n## 🚨 注意事项\n\n1. 修改后请先在小数据集上测试\n2. 观察内存使用情况，确保没有内存泄漏\n3. 如果出现问题，可以还原备份文件\n4. 可以根据实际情况调整节流时间和清理频率\n"
+}

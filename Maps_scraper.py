@@ -5363,19 +5363,13 @@ class GoogleMapsApp(QWidget):
                 pm_loop = self.get_playwright_manager()._loop
                 if pm_loop:
                     if not hasattr(self, 'global_network_semaphore'):
-                        # 【智能限流】根据页面池大小动态调整网络并发数
-                        import asyncio  # 【修复】确保asyncio模块在此作用域可用
+                        # 【最终修复】使用threading.Semaphore避免asyncio复杂性
                         max_concurrent = min(15, self.playwright_pool_size * 3)  # 每个页面最多3个并发请求
-                        async def create_semaphore_coro(): return asyncio.Semaphore(max_concurrent)
-                        future = asyncio.run_coroutine_threadsafe(create_semaphore_coro(), pm_loop)
-                        try:
-                            # 【UI响应性修复】使用短超时避免UI阻塞
-                            self.global_network_semaphore = future.result(timeout=5)
-                            print(f"✅ [架构] 全局网络请求限流阀已创建，最大并发数: {max_concurrent} (基于{self.playwright_pool_size}个页面池)")
-                        except asyncio.TimeoutError:
-                            print(f"⚠️ 创建网络限流阀超时，使用默认配置")
-                            # 创建一个默认的信号量，避免程序崩溃
-                            self.global_network_semaphore = asyncio.Semaphore(max_concurrent)
+                        print(f"✅ [架构] 全局网络请求限流阀已创建，最大并发数: {max_concurrent} (基于{self.playwright_pool_size}个页面池)")
+                        
+                        # 直接使用threading.Semaphore，简单可靠
+                        import threading
+                        self.global_network_semaphore = threading.Semaphore(max_concurrent)
 
                     # 【UI响应性修复】直接异步执行fetch_email，避免创建Worker对象
                     # 这样可以完全避免UI线程阻塞问题

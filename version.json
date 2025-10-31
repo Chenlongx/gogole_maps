@@ -1,0 +1,14 @@
+{
+  "version": "1.0.7",
+  "build_date": "2025-10-31",
+  "app_name": "Google Maps Scraper",
+  "update_url": "https://raw.githubusercontent.com/Chenlongx/gogole_maps/main/updates/version_latest.json",
+  "changelog": [
+    "修复Qt浏览器跳过商家问题",
+    "增加Playwright缓存清理功能",
+    "添加远程更新功能",
+    "优化内存使用和性能",
+    "修复无限循环bug"
+  ]
+}
+

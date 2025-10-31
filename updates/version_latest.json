@@ -1,0 +1,34 @@
+{
+  "version": "1.0.7",
+  "build_date": "2025-11-01",
+  "app_name": "Google Maps Scraper",
+  "changelog": [
+    "修复Qt浏览器跳过商家问题",
+    "增加Playwright缓存清理功能",
+    "添加远程更新功能",
+    "优化内存使用和性能",
+    "修复无限循环bug"
+  ],
+  "files": [
+    {
+      "name": "Maps_scraper.py",
+      "url": "https://raw.githubusercontent.com/Chenlongx/gogole_maps/main/Maps_scraper.py",
+      "sha256": "BBCA272C6ADF89DABE15DFC5F21C2747ECD0A50C489A7E6E758565763D23F013",
+      "size": 798277
+    },
+    {
+      "name": "update_manager.py",
+      "url": "https://raw.githubusercontent.com/Chenlongx/gogole_maps/main/update_manager.py",
+      "sha256": "433871807873F0909C2123EB0067CA0250267B2076D4A40A264891AAE15C6ABA",
+      "size": 14663
+    },
+    {
+      "name": "updater_dialog.py",
+      "url": "https://raw.githubusercontent.com/Chenlongx/gogole_maps/main/updater_dialog.py",
+      "sha256": "94842965453DBA77280BE19762BDFDD241BB8DDCB6D41852BE956B75B5385F08",
+      "size": 20226
+    }
+  ],
+  "package_url": "https://github.com/Chenlongx/gogole_maps/releases/download/v1.0.7/GoogleMapsScraper-Setup.exe"
+}
+

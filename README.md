@@ -103,7 +103,7 @@ A: 访问 [Issues](https://github.com/Chenlongx/gogole_maps/issues) 提交问题
 如有问题或建议，请通过以下方式联系：
 
 - 💬 [提交Issue](https://github.com/Chenlongx/gogole_maps/issues/new)
-- 📧 邮箱：support@example.com
+- 📧 邮箱：service@summitgearhub.com
 
 ---
 

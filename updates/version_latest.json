@@ -1,6 +1,6 @@
 {
-  "version": "1.0.7",
-  "build_date": "2026-3-17",
+  "version": "1.1.1",
+  "build_date": "2026-6-17",
   "app_name": "Global Merchant Helper",
   "changelog": [
     "修复Qt浏览器跳过商家问题",
@@ -10,5 +10,5 @@
     "修复无限循环bug"
   ],
   "files": [],
-  "package_url": "https://downloads.mediamingle.cn/global-merchant-helper/v1.0.8/update.zip"
+  "package_url": "https://downloads.mediamingle.cn/global-merchant-helper/update.zip"
 }
